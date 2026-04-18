@@ -24,35 +24,50 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
+        self.amount_by_query = {}
 
-    def _process_data(self, fruit, amount):
+    def _process_data(self, query_id, fruit, amount):
         logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self):
+        if query_id not in self.amount_by_query:
+            self.amount_by_query[query_id] = {}
+
+        current = self.amount_by_query[query_id]
+
+        current[fruit] = current.get(fruit, fruit_item.FruitItem(fruit, 0)) + \
+                fruit_item.FruitItem(fruit, int(amount))
+        
+        self.amount_by_query[query_id] = current
+
+    def _process_eof(self, query_id):
         logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
+
+        data = self.amount_by_query.get(query_id, {})
+
+        for final_fruit_item in data.values():
+            for exchange in self.data_output_exchanges:
+                exchange.send(
                     message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount]
+                        [query_id, final_fruit_item.fruit, final_fruit_item.amount]
                     )
                 )
 
         logging.info(f"Broadcasting EOF message")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([]))
+
+        for exchange in self.data_output_exchanges:
+            exchange.send(message_protocol.internal.serialize([query_id]))
+        
+        del self.amount_by_query[query_id]
 
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
-        else:
-            self._process_eof(*fields)
+        if len(fields) == 3:
+            query_id, fruit, amount = fields
+            self._process_data(query_id, fruit, amount)
+        elif len(fields) == 1:
+            query_id = fields[0]
+            self._process_eof(query_id)
         ack()
 
     def start(self):
