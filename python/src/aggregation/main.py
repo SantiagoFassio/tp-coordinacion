@@ -23,39 +23,48 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top_by_query = {}
+        self.fruit_counts_by_query = {}
+        self.eof_count_by_query = {}
+        self.closed_queries = set()
 
     def _process_data(self, query_id, fruit, amount):
-        logging.info("Processing data message")
+        logging.info(f"Processing data message for {query_id}")
 
-        if query_id not in self.fruit_top_by_query:
-            self.fruit_top_by_query[query_id] = []
+        if query_id in self.closed_queries:
+            logging.info(f"Query {query_id} already closed, This should not happen, ignoring data message")
+            return
 
-        fruit_top = self.fruit_top_by_query[query_id]
-
-        for i in range(len(fruit_top)):
-            if fruit_top[i].fruit == fruit:
-                fruit_top[i] = self.fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
-                return
-        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
+        if query_id not in self.fruit_counts_by_query:
+            self.fruit_counts_by_query[query_id] = {}
+        self.fruit_counts_by_query[query_id][fruit] = self.fruit_counts_by_query[query_id].get(fruit, 0) + amount
 
     def _process_eof(self, query_id):
-        logging.info("Received EOF")
-        fruit_chunk = list(self.fruit_top_by_query[query_id][-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
-            )
-        )
+
+        if query_id in self.closed_queries:
+            logging.info(f"Query {query_id} already closed, This should not happen, ignoring EOF message")
+            return
+        
+        self.eof_count_by_query[query_id] = self.eof_count_by_query.get(query_id, 0) + 1
+
+        count = self.eof_count_by_query[query_id]
+        logging.info(f"Received EOF for {query_id}, this is the {count} EOF received for this query")
+
+        if self.eof_count_by_query[query_id] < SUM_AMOUNT:
+            return
+        
+        logging.info(f"Received all EOF for {query_id}, calculating top and sending to output queue")
+
+        self.closed_queries.add(query_id)
+
+        fruit_counts = self.fruit_counts_by_query.get(query_id, {})
+        fruit_top = sorted(fruit_counts.items(), key=lambda x: x[1], reverse=True)[:TOP_SIZE]
+        
         self.output_queue.send(message_protocol.internal.serialize([query_id, fruit_top]))
-        del self.fruit_top_by_query[query_id]
+        del self.fruit_counts_by_query[query_id]
+        del self.eof_count_by_query[query_id]
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Process message")
+        
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             query_id, fruit, amount = fields
