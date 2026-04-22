@@ -1,6 +1,5 @@
 import os
 import logging
-import bisect
 
 from common import middleware, message_protocol, fruit_item
 
@@ -13,6 +12,8 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+DATA_MESSAGE = "DATA"
+EOF_MESSAGE = "EOF"
 
 class AggregationFilter:
 
@@ -24,7 +25,6 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_counts_by_query = {}
-        self.eof_count_by_query = {}
         self.closed_queries = set()
 
     def _process_data(self, query_id, fruit, amount):
@@ -44,15 +44,7 @@ class AggregationFilter:
             logging.info(f"Query {query_id} already closed, This should not happen, ignoring EOF message")
             return
         
-        self.eof_count_by_query[query_id] = self.eof_count_by_query.get(query_id, 0) + 1
-
-        count = self.eof_count_by_query[query_id]
-        logging.info(f"Received EOF for {query_id}, this is the {count} EOF received for this query")
-
-        if self.eof_count_by_query[query_id] < SUM_AMOUNT:
-            return
-        
-        logging.info(f"Received all EOF for {query_id}, calculating top and sending to output queue")
+        logging.info(f"Received EOF for {query_id}, calculating partial top and sending to output queue")
 
         self.closed_queries.add(query_id)
 
@@ -61,16 +53,17 @@ class AggregationFilter:
         
         self.output_queue.send(message_protocol.internal.serialize([query_id, fruit_top]))
         del self.fruit_counts_by_query[query_id]
-        del self.eof_count_by_query[query_id]
 
     def process_messsage(self, message, ack, nack):
-        
+
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 3:
-            query_id, fruit, amount = fields
+        msg_type = fields[0]
+
+        if msg_type == DATA_MESSAGE:
+            _, query_id, fruit, amount = fields
             self._process_data(query_id, fruit, amount)
-        elif len(fields) == 1:
-            query_id = fields[0]
+        if msg_type == EOF_MESSAGE:
+            _, query_id = fields
             self._process_eof(query_id)
         ack()
 

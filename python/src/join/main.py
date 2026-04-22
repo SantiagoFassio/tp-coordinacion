@@ -22,11 +22,42 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.messages_by_query = {}
+        self.partial_top_by_query = {}
+        self.closed_queries = set()
+
+    def _process_top(self, query_id, fruit_top):
+
+
+        if query_id in self.closed_queries:
+            logging.info(f"Query {query_id} already closed, This should not happen, ignoring top message")
+            return
+        
+        if query_id not in self.messages_by_query:
+            self.partial_top_by_query[query_id] = {}
+            self.messages_by_query[query_id] = 0
+
+        for fruit, amount in fruit_top:
+            self.partial_top_by_query[query_id][fruit] = amount
+        
+        self.messages_by_query[query_id] += 1
+
+        if self.messages_by_query[query_id] < AGGREGATION_AMOUNT:
+            logging.info(f"Received partial top for {query_id}, waiting for more messages")
+            return
+        
+        logging.info(f"Received all partial tops for {query_id}, calculating final top and sending to output queue")
+        
+        self.closed_queries.add(query_id)
+
+        fruit_counts = self.partial_top_by_query[query_id]
+        fruit_top = sorted(fruit_counts.items(), key=lambda x: x[1], reverse=True)[:TOP_SIZE]
+        self.output_queue.send(message_protocol.internal.serialize([query_id, fruit_top]))
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Received top")
         query_id, fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize([query_id, fruit_top]))
+        logging.info(f"Received top from {query_id}")
+        self._process_top(query_id, fruit_top)
         ack()
 
     def start(self):

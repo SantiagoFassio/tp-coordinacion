@@ -117,12 +117,9 @@ class SumFilter:
 
             self.data_output_exchanges[shard_idx].send(
                 message_protocol.internal.serialize(
-                    [query_id, final_fruit_item.fruit, final_fruit_item.amount]
+                    [DATA_MESSAGE, query_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
             )
-        
-        for exchange in self.data_output_exchanges:
-            exchange.send(message_protocol.internal.serialize([query_id]))
 
         self.flushed_by_query.add(query_id)
 
@@ -130,6 +127,11 @@ class SumFilter:
         self.local_count_by_query.pop(query_id, None)
         self.last_contributed_by_query.pop(query_id, None)
         self.expected_total_by_query.pop(query_id, None)
+    
+    def _flush_eof(self, query_id):
+        eof_message = message_protocol.internal.serialize([EOF_MESSAGE, query_id])
+        for exchange in self.data_output_exchanges:
+            exchange.send(eof_message)
     
     def _cleanup_query(self, query_id):
         self.amount_by_query.pop(query_id, None)
@@ -201,6 +203,7 @@ class SumFilter:
     def _process_flush_order(self, query_id, origin_id):
         if origin_id == ID:
             self._flush_query(query_id)
+            self._flush_eof(query_id)
             self.closed_by_query.add(query_id)
             return
 
