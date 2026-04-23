@@ -59,9 +59,11 @@ class SumFilter:
         self.flushed_by_query = set() # query_id -> already flushed the query
         self.closed_by_query = set() # query_id -> already closed the query, no more data messages should be processed
 
-    def _routing_key_for_fruit(self, fruit):
-        idx = zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
-        return f"{AGGREGATION_PREFIX}_{idx}"
+    def _hash_fruit_for_key(self, fruit):
+        h = 0
+        for c in fruit:
+            h = (h * 31 + ord(c)) % AGGREGATION_AMOUNT
+        return h
     
     def _publish_control_message(self, message):
         self.control_output.send(message)
@@ -115,10 +117,9 @@ class SumFilter:
 
         data = self.amount_by_query.get(query_id, {})
         for final_fruit_item in data.values():
-            routing_key = self._routing_key_for_fruit(final_fruit_item.fruit)
-            shard_idx = int(routing_key.split("_", 1)[-1])
+            key = self._hash_fruit_for_key(final_fruit_item.fruit)
 
-            self.data_output_exchanges[shard_idx].send(
+            self.data_output_exchanges[key].send(
                 message_protocol.internal.serialize(
                     [DATA_MESSAGE, query_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
