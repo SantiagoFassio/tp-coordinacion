@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -25,10 +26,9 @@ class JoinFilter:
         self.messages_by_query = {}
         self.partial_top_by_query = {}
         self.closed_queries = set()
+        self.should_stop = False
 
     def _process_top(self, query_id, fruit_top):
-
-
         if query_id in self.closed_queries:
             logging.info(f"Query {query_id} already closed, This should not happen, ignoring top message")
             return
@@ -61,12 +61,27 @@ class JoinFilter:
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            self.handle_sigterm()
+
+    def handle_sigterm(self):
+        if self.should_stop:
+            return
+        logging.info("Received SIGTERM, stopping gracefully...")
+        self.should_stop = True
+        self.input_queue.stop_consuming()
+        self.output_queue.close()
+        self.input_queue.close()
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
+
+    signal.signal(signal.SIGTERM, lambda signum, frame: join_filter.handle_sigterm())
+
     join_filter.start()
 
     return 0

@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -26,6 +27,7 @@ class AggregationFilter:
         )
         self.fruit_counts_by_query = {}
         self.closed_queries = set()
+        self.should_stop = False
 
     def _process_data(self, query_id, fruit, amount):
         logging.info(f"Processing data message for {query_id}")
@@ -68,12 +70,27 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        try:
+            self.input_exchange.start_consuming(self.process_messsage)
+        finally:
+            self.handle_sigterm()
+
+    def handle_sigterm(self):
+        if self.should_stop:
+            return
+        logging.info("Received SIGTERM, stopping gracefully...")
+        self.should_stop = True
+        self.input_exchange.stop_consuming()
+        self.output_queue.close()
+        self.input_exchange.close()
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
+
+    signal.signal(signal.SIGTERM, lambda signum, frame: aggregation_filter.handle_sigterm())
+
     aggregation_filter.start()
     return 0
 

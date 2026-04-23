@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import zlib
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -23,6 +24,8 @@ class SumFilter:
     def __init__(self):
         #lock
         self.lock = threading.Lock()
+        self.should_stop = False
+        self.control_thread = None
 
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
@@ -257,31 +260,32 @@ class SumFilter:
             nack()
 
     def start(self):
-        control_thread = threading.Thread(
+        self.control_thread = threading.Thread(
             target=self.control_input.start_consuming,
-            args=(self.process_control_message,),
-            daemon=True
+            args=(self.process_control_message,)
         )
-        control_thread.start()
+        self.control_thread.start()
+        try:
+            self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            self.handle_sigterm()
+            if self.control_thread is not None:
+                self.control_thread.join(timeout = 5)
+            self.close()
 
-        self.input_queue.start_consuming(self.process_data_messsage)
+    def handle_sigterm(self):
+        if self.should_stop:
+            return
+        logging.info("Received SIGTERM, stopping gracefully...")
+        self.should_stop = True
+        self.input_queue.stop_consuming()
+        self.control_input.stop_consuming()
+        self.close()
 
     def close(self):
-        try:
-            self.input_queue.close()
-        except Exception:
-            pass
-
-        try:
-            self.control_input.close()
-        except Exception:
-            pass
-
-        try:
-            self.control_output.close()
-        except Exception:
-            pass
-
+        self.input_queue.close()
+        self.control_input.close()
+        self.control_output.close()
         for exchange in self.data_output_exchanges:
             try:
                 exchange.close()
@@ -291,6 +295,7 @@ class SumFilter:
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(signal.SIGTERM, lambda signum, frame: sum_filter.handle_sigterm())
     sum_filter.start()
     return 0
 
