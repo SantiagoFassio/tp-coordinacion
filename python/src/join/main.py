@@ -15,7 +15,11 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 
 
 class JoinFilter:
-
+    '''
+    JoinFilter collects the partial tops from the Aggregation layer for each query,
+    and when it has received all the partial tops for a query,
+    it calculates the final top for that query and sends it to the output queue.
+    '''
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
@@ -29,6 +33,11 @@ class JoinFilter:
         self.should_stop = False
 
     def _process_top(self, query_id, fruit_top):
+        '''
+        Processes a partial top message for a given query by storing the received partial top,
+        and when all partial tops for the query have been received,
+        it calculates the final top and sends it to the output queue.
+        '''
         if query_id in self.closed_queries:
             logging.info(f"Query {query_id} already closed, This should not happen, ignoring top message")
             return
@@ -55,18 +64,28 @@ class JoinFilter:
         self.output_queue.send(message_protocol.internal.serialize([query_id, fruit_top]))
 
     def process_messsage(self, message, ack, nack):
+        '''
+        receives a message from the input queue, deserializes it, 
+        and processes it as a partial top message for a query.
+        '''
         query_id, fruit_top = message_protocol.internal.deserialize(message)
         logging.info(f"Received top from {query_id}")
         self._process_top(query_id, fruit_top)
         ack()
 
     def start(self):
+        '''
+        Starts the Join filter by consuming messages from the input queue.
+        '''
         try:
             self.input_queue.start_consuming(self.process_messsage)
         finally:
             self.handle_sigterm()
 
     def handle_sigterm(self):
+        '''
+        Handles the sigterm signal for graceful shutdown.
+        '''
         if self.should_stop:
             return
         logging.info("Received SIGTERM, stopping gracefully...")
@@ -77,6 +96,9 @@ class JoinFilter:
 
 
 def main():
+    '''
+    Creates an instance of the JoinFilter class, sets up logging, and starts the filter.
+    '''
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
 

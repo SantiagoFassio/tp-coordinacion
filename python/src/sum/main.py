@@ -1,7 +1,6 @@
 import os
 import logging
 import threading
-import zlib
 import signal
 
 from common import middleware, message_protocol, fruit_item
@@ -21,8 +20,14 @@ COUNT_TOKEN_MESSAGE = "COUNT"
 FLUSH_ORDER_MESSAGE = "FLUSH"
 
 class SumFilter:
+    '''
+    SumFilter is a filter that receives data messages from the client, 
+    processes them to keep track of the count of each fruit for each query, 
+    and synchronizes with other SumFilter instances in a ring architecture to 
+    ensure all data messages for a query have been received before 
+    flushing the results to the aggregation layer.
+    '''
     def __init__(self):
-        #lock
         self.lock = threading.Lock()
         self.should_stop = False
         self.control_thread = None
@@ -60,17 +65,31 @@ class SumFilter:
         self.closed_by_query = set() # query_id -> already closed the query, no more data messages should be processed
 
     def _hash_fruit_for_key(self, fruit):
+        '''
+        Hashing function to determine the exchange a fruit will be sent to.
+        A fruit will always be sent to the same exchange.
+        '''
         h = 0
         for c in fruit:
             h = (h * 31 + ord(c)) % AGGREGATION_AMOUNT
         return h
     
     def _publish_control_message(self, message):
+        '''
+        Publishes a control message to the next sum instance in the ring.
+        Control messages are used for synchronization between sum instances, 
+        such as count tokens and flush orders.
+        '''
         self.control_output.send(message)
 
     def _publish_count_token(
             self, query_id, expected_total, accumulated_count, dirty, origin_id
     ):
+        '''
+        Creates and publishes a count token message to the next sum instance in the ring.
+        Count tokens are used to keep track of how many data messages have been received for a query
+        accross all sum instances.
+        '''
         token = message_protocol.internal.serialize(
             [
                 COUNT_TOKEN_MESSAGE,
@@ -84,6 +103,11 @@ class SumFilter:
         self._publish_control_message(token)
 
     def _publish_flush_order(self, query_id, origin_id):
+        '''
+        Creates and publishes a flush order message to the next sum instance in the ring.
+        Flush order messages are used to signal all sum instances to flush the results of a query
+        to the aggregation layer.
+        '''
         msg = message_protocol.internal.serialize(
             [
                 FLUSH_ORDER_MESSAGE,
@@ -94,6 +118,11 @@ class SumFilter:
         self._publish_control_message(msg)
 
     def _contribute_local_count(self, query_id):
+        '''
+        Contributes the local count of data messages received for a query to the count token.
+        If the local count has changed since the last contribution, it returns the delta to be
+        added to the accumulated count in the token, and updates the last contributed count.
+        '''
         local_count = self.local_count_by_query.get(query_id, 0)
         last = self.last_contributed_by_query.get(query_id, 0)
         delta = local_count - last
@@ -102,6 +131,12 @@ class SumFilter:
         return delta
     
     def _start_token(self, query_id, expected_total):
+        '''
+        A Sum designates itself as the Tokn Master for a query as it receives the EOF message
+        from the previous stage. The Token Master is responsible for starting the count token and
+        for publishing flush orders when the token completes a full round and the accumulated count
+        matches the expected total.
+        '''
         local_count = self.local_count_by_query.get(query_id, 0)
         self.last_contributed_by_query[query_id] = local_count
         self._publish_count_token(
@@ -110,6 +145,12 @@ class SumFilter:
         self.token_started_by_query.add(query_id)
     
     def _flush_query(self, query_id):
+        '''
+        When a flush order is received, the Sum flushes the results of the query to the aggregation layer.
+        It also deletes all the state related to the query and adds the query to the flushed set 
+        to ignore any bugs or messages that might arrive related to the flushed query.
+        These messages are not expected to arrive, but this is a safety measure to avoid errors.
+        '''
         if query_id in self.flushed_by_query:
             return
         
@@ -133,11 +174,19 @@ class SumFilter:
         self.expected_total_by_query.pop(query_id, None)
     
     def _flush_eof(self, query_id):
+        '''
+        The Token Master, when recieving the flush order back, assumes all information has been published
+        to the aggregation layer and broadcasts an EOF message to signal the end of the query results. 
+        This is to inform the aggregation level all information on that query has been sent.
+        '''
         eof_message = message_protocol.internal.serialize([EOF_MESSAGE, query_id])
         for exchange in self.data_output_exchanges:
             exchange.send(eof_message)
     
     def _cleanup_query(self, query_id):
+        '''
+        Inclusion of a cleanup function to remove all state related to a query.
+        '''
         self.amount_by_query.pop(query_id, None)
         self.local_count_by_query.pop(query_id, None)
         self.last_contributed_by_query.pop(query_id, None)
@@ -145,7 +194,11 @@ class SumFilter:
         self.token_started_by_query.discard(query_id)
 
     def _process_data(self, query_id, fruit, amount):
-        #logging.info(f"Process data")
+        '''
+        Process a data message sent by the client.
+        It updates the local state of this Sum instance with the new information, 
+        and increments the local count of messages received for the query for sync purposes.
+        '''
 
         if query_id in self.flushed_by_query or query_id in self.closed_by_query:
             logging.info(f"Query {query_id} already flushed or closed, This should not happen, ignoring data message")
@@ -164,7 +217,13 @@ class SumFilter:
         self.local_count_by_query[query_id] += 1
 
     def _process_eof(self, query_id, messages_handled):
-        logging.info(f"EOF. Broadcasting data messages")
+        '''
+        Process an EOF message sent by the previous stage, indicating that all data messages for a query have been sent.
+        The Sum instance that receives the EOF message first designates itself as the Token Master for the
+        query, and is responsible for starting the count token and for publishing flush orders when the token
+        completes a full round and the accumulated count matches the expected total.
+        '''
+        logging.info(f"EOF received for query {query_id} with messages handled {messages_handled}")
 
         if query_id in self.flushed_by_query or query_id in self.closed_by_query:
             logging.info(f"Query {query_id} already flushed or closed, This should not happen, ignoring EOF message")
@@ -179,6 +238,13 @@ class SumFilter:
     def _process_count_token(
         self, query_id, expected_total, accumulated_count, dirty, origin_id
     ):
+        '''
+        Process a count token message received from the previous Sum instance in the ring.
+        The count token carries the accumulated count of data messages received for a query across all Sum instances
+        as it circulates the ring. Each Sum instance contributes its local count to the token, and if the token
+        completes a full round and the accumulated count matches the expected total, 
+        the Token Master publishes a flush order for all other SUM instances.
+        '''
         logging.info(f"Process count token for query {query_id} with accumulated count {accumulated_count} and expected total {expected_total}")
 
         if query_id in self.flushed_by_query or query_id in self.closed_by_query:
@@ -205,6 +271,12 @@ class SumFilter:
             )
     
     def _process_flush_order(self, query_id, origin_id):
+        '''
+        Process a flush order message received from the previous Sum instance in the ring.
+        When a flush order is received, the Sum instance flushes the results of the query to
+        the aggregation layer, and if it is the Token Master, it also broadcasts an EOF message 
+        to signal the end of the query results.
+        '''
         if origin_id == ID:
             self._flush_query(query_id)
             self._flush_eof(query_id)
@@ -222,6 +294,10 @@ class SumFilter:
         self._publish_flush_order(query_id, origin_id)
 
     def process_data_messsage(self, message, ack, nack):
+        '''
+        When a data message is received from the client, it is processed to 
+        update the local state of the Sum instance.
+        '''
         try:
 
             fields = message_protocol.internal.deserialize(message)
@@ -241,6 +317,11 @@ class SumFilter:
             nack()
     
     def process_control_message(self, message, ack, nack):
+        '''
+        When a control message is received from the previous Sum instance in the ring, it is processed to
+        update the synchronization state of the Sum instance, and to contribute to the count token or to
+        flush the query results when a flush order is received.
+        '''
         try:
             fields = message_protocol.internal.deserialize(message)
             msg_type = fields[0]
@@ -261,6 +342,11 @@ class SumFilter:
             nack()
 
     def start(self):
+        '''
+        Starts the Sum filter by starting the control thread to consume control messages 
+        from the previous Sum instance in the ring,
+        and starting to consume data messages from the client.
+        '''
         self.control_thread = threading.Thread(
             target=self.control_input.start_consuming,
             args=(self.process_control_message,)
@@ -275,6 +361,9 @@ class SumFilter:
             self.close()
 
     def handle_sigterm(self):
+        '''
+        Handles the sigterm signal for graceful shutdown.
+        '''
         if self.should_stop:
             return
         logging.info("Received SIGTERM, stopping gracefully...")
@@ -284,6 +373,9 @@ class SumFilter:
         self.close()
 
     def close(self):
+        '''
+        Closes all queues and exchanges used by the Sum filter.
+        '''
         self.input_queue.close()
         self.control_input.close()
         self.control_output.close()
@@ -294,6 +386,9 @@ class SumFilter:
                 pass
 
 def main():
+    '''
+    Main function to start the Sum filter. It sets up logging, creates an instance of the SumFilter class,
+    '''
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
     signal.signal(signal.SIGTERM, lambda signum, frame: sum_filter.handle_sigterm())

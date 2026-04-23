@@ -17,7 +17,10 @@ DATA_MESSAGE = "DATA"
 EOF_MESSAGE = "EOF"
 
 class AggregationFilter:
-
+    '''
+    Aggregation filter keeps partial tops for ech query, and flushes them to the Joining layer when an 
+    EOF message is received for a query.
+    '''
     def __init__(self):
         self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
@@ -30,6 +33,9 @@ class AggregationFilter:
         self.should_stop = False
 
     def _process_data(self, query_id, fruit, amount):
+        '''
+        Updates the fruit counts for a given query with the data received in a data message.
+        '''
         logging.info(f"Processing data message for {query_id}")
 
         if query_id in self.closed_queries:
@@ -41,7 +47,10 @@ class AggregationFilter:
         self.fruit_counts_by_query[query_id][fruit] = self.fruit_counts_by_query[query_id].get(fruit, 0) + amount
 
     def _process_eof(self, query_id):
-
+        '''
+        Processes an EOF message for a given query by calculating the partial top for that query and 
+        sending it to the output queue, and marks the query as closed.
+        '''
         if query_id in self.closed_queries:
             logging.info(f"Query {query_id} already closed, This should not happen, ignoring EOF message")
             return
@@ -57,7 +66,11 @@ class AggregationFilter:
         del self.fruit_counts_by_query[query_id]
 
     def process_messsage(self, message, ack, nack):
-
+        '''
+        Deserealizes the received message from the Sum layer, and processes it according to its type
+        (data or EOF). For data messages, it updates the fruit counts for the corresponding query, 
+        and for EOF messages, it calculates the partial top for the query and sends it to the output queue.
+        '''
         fields = message_protocol.internal.deserialize(message)
         msg_type = fields[0]
 
@@ -70,12 +83,18 @@ class AggregationFilter:
         ack()
 
     def start(self):
+        '''
+        Starts the Aggregation filter by consuming messages from the input exchange.
+        '''
         try:
             self.input_exchange.start_consuming(self.process_messsage)
         finally:
             self.handle_sigterm()
 
     def handle_sigterm(self):
+        '''
+        Handles the sigterm signal for graceful shutdown.
+        '''
         if self.should_stop:
             return
         logging.info("Received SIGTERM, stopping gracefully...")
@@ -86,6 +105,9 @@ class AggregationFilter:
 
 
 def main():
+    '''
+    Created an instance of the AggregationFilter class, sets up logging, and starts the filter.
+    '''
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
 
